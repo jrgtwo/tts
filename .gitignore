@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Downloaded model weights — re-fetch from HF, don't commit
+models/
+
+# Generated audio + scratch text
+output/
+*.wav
+answer.txt
+response.txt
+md_test.txt
