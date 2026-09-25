@@ -209,6 +209,79 @@ def synth(engine: str, text: str, args) -> tuple[np.ndarray, int]:
     die(f"unknown engine {engine}")
 
 
+# --------------------------------------------------------------------------- #
+# 4b. load once, synthesize many — for callers that synthesize in pieces
+# --------------------------------------------------------------------------- #
+
+class Voice:
+    """A TTS engine loaded once, ready to synthesize repeatedly.
+
+    synth() above reloads the model on every call, which is fine for one shot
+    and useless when a streaming caller invokes it per sentence. Same engines,
+    same flags, same defaults — the load just happens up front.
+    """
+
+    def __init__(self, engine: str, say):
+        self.engine = engine
+        self._say = say
+        self.sample_rate: int | None = None
+
+    def say(self, text: str) -> tuple[np.ndarray, int] | None:
+        """Synthesize one piece of text. None if the engine produced nothing."""
+        got = self._say(text)
+        if got is None:
+            return None
+        audio, sr = got
+        self.sample_rate = sr
+        return audio, sr
+
+
+def load_voice(engine: str, args) -> Voice:
+    """Resolve paths, load the model, return a Voice. Piper and kokoro only."""
+    d = DEFAULTS[engine]
+    model = Path(args.model) if args.model else d["model"]
+    if not model.exists():
+        die(f"model not found: {model}")
+    speaker = args.speaker or d.get("speaker")
+    speed = getattr(args, "speed", 1.0) or 1.0
+    noise = getattr(args, "noise", None)
+
+    if engine == "piper":
+        from piper import PiperVoice, SynthesisConfig
+        # piper's length_scale is DURATION, so it's inverted: higher = slower.
+        cfg = SynthesisConfig(length_scale=1.0 / speed)
+        if noise is not None:
+            cfg.noise_scale = noise
+        v = PiperVoice.load(str(model))
+
+        def say(text: str):
+            chunks = list(v.synthesize(text, syn_config=cfg))
+            if not chunks:
+                return None
+            audio = np.concatenate([c.audio_float_array for c in chunks])
+            return audio.astype(np.float32), chunks[0].sample_rate
+
+        return Voice(engine, say)
+
+    if engine == "kokoro":
+        from kokoro_onnx import Kokoro
+        voices = Path(args.voices) if args.voices else d["voices"]
+        if not voices.exists():
+            die(f"voices file not found: {voices}")
+        if noise is not None:
+            print(f"note: --noise has no effect with the {engine} engine; ignoring",
+                  file=sys.stderr)
+        k = Kokoro(str(model), str(voices))
+
+        def say(text: str):
+            audio, sr = k.create(text, voice=speaker, speed=speed, lang=args.lang)
+            return np.asarray(audio, dtype=np.float32), sr
+
+        return Voice(engine, say)
+
+    die(f"{engine} cannot synthesize incrementally; use synth() for a single pass")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

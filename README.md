@@ -12,6 +12,7 @@ aren't on disk, the scripts exit with an error naming the path they wanted.
 | --- | --- |
 | `speak.py` | Read text from a file, the clipboard, or stdin → `.wav` |
 | `ask_and_speak.py` | Prompt a running llama-server, speak the answer → `.wav` |
+| `stream_and_speak.py` | Same, but spoken live as the model generates |
 | `tts_test.py` | Benchmark one engine on fixed text and report RTF |
 
 `ask_and_speak.py` is also the shared library: `DEFAULTS`, `synth()`,
@@ -41,7 +42,11 @@ Python 3.13, virtualenv in `.venv/`:
 python -m venv .venv
 .venv/Scripts/activate        # Windows; use .venv/bin/activate elsewhere
 pip install piper-tts kokoro-onnx qwen-tts soundfile numpy torch
+pip install sounddevice        # only needed for stream_and_speak.py playback
 ```
+
+`sounddevice` is imported lazily, so `speak.py` and `ask_and_speak.py` run
+without it.
 
 ### Model weights
 
@@ -95,8 +100,8 @@ Requires llama-server already running with an OpenAI-compatible endpoint
 
 ```bash
 python ask_and_speak.py "Explain why the sky is blue, in three sentences."
-python ask_and_speak.py "..." --engine kokoro --speaker af_heart
-python ask_and_speak.py "..." --out answer.wav --keep-text
+python ask_and_speak.py "Summarize the water cycle." --engine kokoro --speaker af_heart
+python ask_and_speak.py "What is a lighthouse for?" --out answer.wav --keep-text
 ```
 
 Not streaming — it waits for the full answer, then synthesizes. It prints LLM
@@ -106,6 +111,38 @@ server-side with `--chat-template-kwargs '{"enable_thinking":false}'`.
 
 Useful flags: `--llm-url`, `--system`, `--max-tokens` (400), `--temperature`
 (0.7), `--timeout` (600s), `--keep-text`.
+
+### Ask and speak, live
+
+```bash
+python stream_and_speak.py "Explain why the sky is blue."
+python stream_and_speak.py --prompt-file prompt.txt
+python stream_and_speak.py --clipboard
+type prompt.txt | python stream_and_speak.py
+
+python stream_and_speak.py --clipboard --engine kokoro --speaker af_heart
+python stream_and_speak.py "Write a bedtime story." --no-save --speed 1.15
+```
+
+The prompt can come from an argument, `--prompt-file`, `--clipboard`, or
+stdin — give it exactly one of those. Handy for long prompts, which are awkward
+to quote as a shell argument on Windows.
+
+Streams the answer over SSE, buffers it into sentences, and synthesizes each
+one while the model is still writing the next. Audio starts a second or two in.
+A sentence is the smallest unit — TTS needs one to get prosody right, so
+nothing is spoken mid-clause.
+
+`piper` and `kokoro` stream. `--engine qwen` falls back to the batch path: text
+still streams to the terminal, audio arrives at the end.
+
+It prints `finish_reason` on completion (`stop` = the model chose to end,
+`length` = it hit a cap), which the web UI doesn't surface.
+
+Flags beyond the shared voice options: `--llm-url` (or `$LLM_URL`),
+`--llm-model`, `--api-key` (or `$LLAMA_API_KEY`), `--max-tokens` (-1, no
+limit), `--prebuffer` (raise to 2 if audio stutters), `--max-chunk-chars`,
+`--no-play`, `--no-save`, `--keep-text`.
 
 ### Benchmark
 
@@ -124,6 +161,7 @@ second of audio. RTF < 1.0 is faster than real time.
 ```
 speak.py            entry point: text → wav
 ask_and_speak.py    entry point: prompt → LLM → wav; also the shared library
+stream_and_speak.py entry point: prompt → LLM → live audio + wav
 tts_test.py         engine benchmark
 models/             weights (not committed — ~2.5 GB)
 output/             generated wavs (not committed)
